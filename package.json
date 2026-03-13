@@ -1,0 +1,48 @@
+{
+  "name": "claude-memory-mcp",
+  "version": "1.0.0",
+  "description": "Long-term memory MCP server for Claude Code with SQLite FTS5 full-text search, BM25 ranking, and access tracking",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "claude-memory-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "claude-code",
+    "memory",
+    "sqlite",
+    "fts5",
+    "ai-memory",
+    "long-term-memory",
+    "model-context-protocol"
+  ],
+  "author": "Vu Duc Tuan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kurovu146/claude-memory-mcp.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "typescript": "^5.7.0"
+  }
+}
