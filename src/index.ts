@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// claude-memory-mcp — Long-term memory MCP server
+// claude-memory-fts — Long-term memory MCP server
 // SQLite + FTS5 full-text search for Claude Code
 //
 // Install:
-//   npx claude-memory-mcp
-//   claude mcp add memory -- npx claude-memory-mcp
+//   npx claude-memory-fts
+//   claude mcp add memory -- npx claude-memory-fts
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -21,7 +21,7 @@ import {
 } from "./repository.js";
 
 const server = new Server(
-  { name: "claude-memory-mcp", version: "1.0.0" },
+  { name: "claude-memory-fts", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 

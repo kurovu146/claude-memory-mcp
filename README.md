@@ -1,4 +1,4 @@
-# claude-memory-mcp
+# claude-memory-fts
 
 Long-term memory MCP server for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Stores facts in a local SQLite database with FTS5 full-text search and BM25 ranking.
 
@@ -16,10 +16,10 @@ Long-term memory MCP server for [Claude Code](https://docs.anthropic.com/en/docs
 
 ```bash
 # Add to Claude Code
-claude mcp add memory -- npx claude-memory-mcp
+claude mcp add memory -- npx claude-memory-fts
 
 # Or run directly
-npx claude-memory-mcp
+npx claude-memory-fts
 ```
 
 ## Configuration
@@ -31,7 +31,7 @@ npx claude-memory-mcp
 Example with custom path:
 
 ```bash
-claude mcp add memory -e MEMORY_DB_PATH=/path/to/my/memory.db -- npx claude-memory-mcp
+claude mcp add memory -e MEMORY_DB_PATH=/path/to/my/memory.db -- npx claude-memory-fts
 ```
 
 ## Tools

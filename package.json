@@ -1,11 +1,11 @@
 {
-  "name": "claude-memory-mcp",
+  "name": "claude-memory-fts",
   "version": "1.0.0",
   "description": "Long-term memory MCP server for Claude Code with SQLite FTS5 full-text search, BM25 ranking, and access tracking",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "claude-memory-mcp": "dist/index.js"
+    "claude-memory-fts": "dist/index.js"
   },
   "files": [
     "dist",
