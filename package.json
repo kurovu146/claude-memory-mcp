@@ -1,6 +1,6 @@
 {
   "name": "claude-memory-fts",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mcpName": "io.github.kurovu146/memory-fts",
   "description": "Long-term memory MCP server for Claude Code with SQLite FTS5 full-text search, BM25 ranking, and access tracking",
   "type": "module",
