@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // claude-memory-fts — Long-term memory MCP server
-// SQLite + FTS5 full-text search for Claude Code
+// SQLite + FTS5 full-text search + semantic vector search for Claude Code
 //
 // Install:
 //   npx claude-memory-fts
@@ -15,13 +15,16 @@ import {
 import {
   saveFact,
   searchFacts,
+  semanticSearch,
   listFacts,
+  updateFact,
   deleteFact,
   countFacts,
+  backfillEmbeddings,
 } from "./repository.js";
 
 const server = new Server(
-  { name: "claude-memory-fts", version: "1.0.0" },
+  { name: "claude-memory-fts", version: "2.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -32,13 +35,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "memory_save",
       description:
-        "Save an important fact to long-term memory. Use when the user shares preferences, technical decisions, conventions, project info, or anything worth remembering across sessions.",
+        "Lưu một fact quan trọng vào long-term memory. Dùng khi user chia sẻ preferences, quyết định kỹ thuật, conventions, thông tin project, hoặc bất cứ điều gì cần nhớ cho các session sau.",
       inputSchema: {
         type: "object" as const,
         properties: {
           fact: {
             type: "string",
-            description: "The information to remember (concise and specific)",
+            description: "Thông tin cần nhớ (ngắn gọn, cụ thể)",
           },
           category: {
             type: "string",
@@ -52,7 +55,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               "general",
             ],
             default: "general",
-            description: "Category for organizing memories",
+            description:
+              "Phân loại: preference | decision | personal | technical | project | workflow | general",
           },
         },
         required: ["fact"],
@@ -61,18 +65,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "memory_search",
       description:
-        "Search long-term memory by keyword using full-text search (FTS5 with BM25 ranking). Use when you need to recall information from previous sessions.",
+        "Tìm kiếm trong long-term memory bằng keyword (FTS5 + BM25) với semantic fallback (vector similarity). Ví dụ: lưu 'tôi thích React' → tìm 'frontend framework preference' vẫn ra kết quả.",
       inputSchema: {
         type: "object" as const,
         properties: {
           keyword: {
             type: "string",
-            description: "Search keyword or phrase",
+            description: "Từ khóa hoặc câu mô tả ý cần tìm",
           },
           limit: {
             type: "number",
             default: 10,
-            description: "Maximum number of results",
+            description: "Số kết quả tối đa",
           },
         },
         required: ["keyword"],
@@ -81,33 +85,64 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "memory_list",
       description:
-        "List all saved memories grouped by category. Use at the start of a session to get an overview of what you know about the user.",
+        "Liệt kê tất cả memories theo category. Dùng đầu session để nắm context về user.",
       inputSchema: {
         type: "object" as const,
         properties: {
           category: {
             type: "string",
-            description: "Filter by category (omit for all)",
+            description: "Lọc theo category (bỏ trống = tất cả)",
           },
           limit: {
             type: "number",
             default: 50,
-            description: "Maximum number of results",
+            description: "Số kết quả tối đa",
           },
         },
       },
     },
     {
-      name: "memory_delete",
+      name: "memory_update",
       description:
-        "Delete a memory by ID. Use when information is outdated or incorrect.",
+        "Cập nhật memory theo ID. Dùng khi cần sửa hoặc bổ sung thông tin mà không cần xóa rồi lưu lại.",
       inputSchema: {
         type: "object" as const,
         properties: {
           id: {
             type: "number",
-            description:
-              "Memory ID (from memory_list or memory_search results)",
+            description: "Memory ID (từ memory_list hoặc memory_search)",
+          },
+          fact: {
+            type: "string",
+            description: "Nội dung mới (bỏ trống = giữ nguyên)",
+          },
+          category: {
+            type: "string",
+            enum: [
+              "preference",
+              "decision",
+              "personal",
+              "technical",
+              "project",
+              "workflow",
+              "general",
+            ],
+            description: "Category mới (bỏ trống = giữ nguyên)",
+          },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "memory_delete",
+      description:
+        "Xóa memory theo ID. Dùng khi thông tin đã lỗi thời hoặc sai.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: {
+            type: "number",
+            description: "Memory ID (từ memory_list hoặc memory_search)",
           },
         },
         required: ["id"],
@@ -125,12 +160,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "memory_save": {
       const fact = args?.fact as string;
       const category = (args?.category as string) || "general";
-      const saved = saveFact(fact, category, "claude-code");
+      const saved = await saveFact(fact, category, "claude-code");
       return {
         content: [
           {
             type: "text" as const,
-            text: `Saved [${saved.id}] [${category}]: "${fact}"`,
+            text: `✅ Saved [${saved.id}] [${category}]: "${fact}"`,
           },
         ],
       };
@@ -139,7 +174,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "memory_search": {
       const keyword = args?.keyword as string;
       const limit = (args?.limit as number) || 10;
-      const facts = searchFacts(keyword, limit);
+      const facts = await searchFacts(keyword, limit);
 
       if (facts.length === 0) {
         return {
@@ -206,6 +241,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text" as const, text }] };
     }
 
+    case "memory_update": {
+      const id = args?.id as number;
+      const fact = args?.fact as string | undefined;
+      const category = args?.category as string | undefined;
+      const updated = await updateFact(id, { fact, category });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: updated
+              ? `✅ Updated [${id}] [${updated.category}]: "${updated.fact}"`
+              : `Memory [${id}] not found`,
+          },
+        ],
+      };
+    }
+
     case "memory_delete": {
       const id = args?.id as number;
       const deleted = deleteFact(id);
@@ -214,7 +266,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           {
             type: "text" as const,
             text: deleted
-              ? `Deleted memory [${id}]`
+              ? `✅ Deleted memory [${id}]`
               : `Memory [${id}] not found`,
           },
         ],
@@ -230,3 +282,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// --- Backfill embeddings for existing facts in background ---
+
+backfillEmbeddings().catch(() => {
+  // Silent fail — embeddings will be generated on next save
+});

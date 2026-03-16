@@ -69,3 +69,10 @@ db.exec(`
 db.exec(
   `INSERT OR IGNORE INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')`
 );
+
+// --- Migration: add embedding column for semantic search ---
+
+const columns = db.pragma("table_info(memory_facts)") as any[];
+if (!columns.some((c: any) => c.name === "embedding")) {
+  db.exec(`ALTER TABLE memory_facts ADD COLUMN embedding BLOB`);
+}
