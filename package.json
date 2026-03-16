@@ -38,7 +38,7 @@
     "url": "git+https://github.com/kurovu146/claude-memory-mcp.git"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
