@@ -4,10 +4,15 @@
 
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { homedir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+import { mkdirSync } from "fs";
 
 const DB_PATH =
   process.env.MEMORY_DB_PATH || join(homedir(), ".claude", "memory.db");
+
+// Ensure parent directory exists
+mkdirSync(dirname(DB_PATH), { recursive: true });
+
 export const db: DatabaseType = new Database(DB_PATH);
 
 // WAL mode — faster writes
