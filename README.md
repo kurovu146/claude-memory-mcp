@@ -2,6 +2,8 @@
 
 Long-term memory MCP server for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Stores facts in a local SQLite database with FTS5 full-text search and BM25 ranking.
 
+[![claude-memory-fts MCP server](https://glama.ai/mcp/servers/kurovu146/claude-memory-mcp/badges/card.svg)](https://glama.ai/mcp/servers/kurovu146/claude-memory-mcp)
+
 ## Features
 
 - **Persistent memory** — facts survive across sessions via SQLite
