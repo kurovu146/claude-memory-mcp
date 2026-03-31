@@ -52,6 +52,7 @@ import {
   updateFact,
   deleteFact,
   countFacts,
+  getTopFacts,
   backfillEmbeddings,
 } from "./repository.js";
 import { db } from "./db.js";
@@ -82,29 +83,69 @@ describe("saveFact", () => {
     const fact = await saveFact("some info");
     expect(fact.category).toBe("general");
   });
+
+  it("preserves accessCount and lastAccessedAt on upsert", async () => {
+    const first = await saveFact("Track me", "general");
+    // Simulate access
+    db.prepare(
+      `UPDATE memory_facts SET access_count = 5, last_accessed_at = 12345 WHERE id = ?`
+    ).run(first.id);
+
+    const second = await saveFact("Track me", "technical");
+    expect(second.id).toBe(first.id);
+    expect(second.accessCount).toBe(5);
+    expect(second.lastAccessedAt).toBe(12345);
+  });
 });
 
-describe("searchFacts", () => {
+describe("searchFacts (hybrid)", () => {
   it("finds facts via FTS5", async () => {
     await saveFact("PostgreSQL is the main database", "technical");
     await saveFact("User enjoys hiking on weekends", "personal");
 
     const results = await searchFacts("database");
-    expect(results).toHaveLength(1);
+    expect(results.length).toBeGreaterThan(0);
     expect(results[0].fact).toContain("PostgreSQL");
   });
 
-  it("falls back to LIKE search for partial matches", async () => {
-    await saveFact("NestJS backend framework", "technical");
+  it("finds facts via semantic when FTS5 misses", async () => {
+    await saveFact("I love using React for frontend development", "preference");
+    await saveFact("PostgreSQL is our main database", "technical");
 
-    const results = await searchFacts("NestJS");
+    // "frontend framework" won't FTS5-match "React" but semantic should find it
+    const results = await searchFacts("frontend framework");
+    expect(results.length).toBeGreaterThan(0);
+  });
+
+  it("boosts results found by both FTS5 and semantic (RRF)", async () => {
+    await saveFact("TypeScript strict mode is required", "decision");
+    await saveFact("User enjoys hiking on weekends", "personal");
+
+    // "TypeScript" should match both FTS5 and semantic → ranked highest
+    const results = await searchFacts("TypeScript");
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].fact).toContain("TypeScript");
+  });
+
+  it("falls back to LIKE when FTS5 + semantic both empty", async () => {
+    // Insert directly without embedding so semantic can't find it
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO memory_facts (fact, category, source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run("NestJS backend framework", "technical", "", now, now);
+    db.exec(
+      `INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')`
+    );
+
+    // Substring "Nest" won't FTS5-MATCH, no embedding → LIKE fallback
+    const results = await searchFacts("Nest");
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].fact).toContain("NestJS");
   });
 
-  it("returns empty array when nothing matches (no semantic)", async () => {
+  it("returns empty array when nothing matches", async () => {
     await saveFact("Something unrelated", "general");
-    // This keyword won't match FTS5, LIKE, or semantic (no embeddings in test)
     const results = await searchFacts("xyznonexistent");
     expect(results).toHaveLength(0);
   });
@@ -125,6 +166,15 @@ describe("searchFacts", () => {
     const facts = listFacts();
     const found = facts.find((f) => f.id === saved.id);
     expect(found!.accessCount).toBe(2);
+  });
+
+  it("deduplicates results from FTS5 and semantic", async () => {
+    await saveFact("React is a frontend library", "technical");
+
+    const results = await searchFacts("React");
+    // Same fact shouldn't appear twice
+    const ids = results.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 
@@ -237,12 +287,26 @@ describe("semanticSearch", () => {
     expect(results).toHaveLength(0);
   });
 
-  it("filters by similarity threshold", async () => {
-    await saveFact("Very specific unique content ABC123", "general");
-    // With fake embeddings, unrelated text should have low similarity
-    const results = await semanticSearch("completely unrelated XYZ789");
-    // Results may or may not pass threshold depending on fake embedding similarity
-    expect(results.length).toBeGreaterThanOrEqual(0);
+  it("filters out low-similarity results below threshold", async () => {
+    await saveFact("I love using React for frontend", "preference");
+
+    // Identical query should return results (high similarity)
+    const good = await semanticSearch("React frontend");
+    expect(good.length).toBeGreaterThan(0);
+
+    // Very different text — fake embeddings should produce low similarity
+    // Insert a fact with no word overlap to the query
+    db.prepare(
+      `INSERT INTO memory_facts (fact, category, source, created_at, updated_at, embedding)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run("zzz_unique_999", "general", "", Date.now(), Date.now(),
+      // Zero vector — cosine similarity with any query = 0, below 0.3 threshold
+      Buffer.alloc(384 * 4)
+    );
+
+    const all = await semanticSearch("React frontend", 100);
+    // The zero-vector fact should be filtered out
+    expect(all.every((f) => f.fact !== "zzz_unique_999")).toBe(true);
   });
 });
 
@@ -263,6 +327,46 @@ describe("backfillEmbeddings", () => {
       .prepare(`SELECT embedding FROM memory_facts WHERE fact = ?`)
       .get("fact without embedding") as any;
     expect(row.embedding).not.toBeNull();
+  });
+});
+
+describe("getTopFacts", () => {
+  it("returns empty when no facts", () => {
+    expect(getTopFacts()).toHaveLength(0);
+  });
+
+  it("ranks high-priority categories above general", async () => {
+    await saveFact("General info", "general");
+    await saveFact("Important preference", "preference");
+    await saveFact("Key decision", "decision");
+
+    const top = getTopFacts(10);
+    expect(top.length).toBe(3);
+    // preference/decision (weight=3) should rank above general (weight=0)
+    const categories = top.map((f) => f.category);
+    expect(categories.indexOf("general")).toBeGreaterThan(
+      categories.indexOf("preference")
+    );
+  });
+
+  it("respects limit", async () => {
+    for (let i = 0; i < 10; i++) {
+      await saveFact(`Fact ${i}`, "general");
+    }
+    expect(getTopFacts(3)).toHaveLength(3);
+  });
+
+  it("boosts frequently accessed facts", async () => {
+    const rare = await saveFact("Rarely accessed", "general");
+    const popular = await saveFact("Often accessed", "general");
+
+    // Simulate access
+    db.prepare(
+      `UPDATE memory_facts SET access_count = 10 WHERE id = ?`
+    ).run(popular.id);
+
+    const top = getTopFacts(10);
+    expect(top[0].id).toBe(popular.id);
   });
 });
 

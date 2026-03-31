@@ -11,21 +11,23 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   saveFact,
   searchFacts,
-  semanticSearch,
   listFacts,
   updateFact,
   deleteFact,
   countFacts,
+  getTopFacts,
   backfillEmbeddings,
 } from "./repository.js";
 
 const server = new Server(
   { name: "claude-memory-fts", version: "2.0.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {}, resources: {} } }
 );
 
 // --- List tools ---
@@ -158,7 +160,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case "memory_save": {
-      const fact = args?.fact as string;
+      const fact = args?.fact;
+      if (!fact || typeof fact !== "string")
+        throw new Error("memory_save requires a non-empty 'fact' string");
       const category = (args?.category as string) || "general";
       const saved = await saveFact(fact, category, "claude-code");
       return {
@@ -172,7 +176,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "memory_search": {
-      const keyword = args?.keyword as string;
+      const keyword = args?.keyword;
+      if (!keyword || typeof keyword !== "string")
+        throw new Error("memory_search requires a non-empty 'keyword' string");
       const limit = (args?.limit as number) || 10;
       const facts = await searchFacts(keyword, limit);
 
@@ -242,7 +248,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "memory_update": {
-      const id = args?.id as number;
+      const id = args?.id;
+      if (id == null || typeof id !== "number")
+        throw new Error("memory_update requires a numeric 'id'");
       const fact = args?.fact as string | undefined;
       const category = args?.category as string | undefined;
       const updated = await updateFact(id, { fact, category });
@@ -259,7 +267,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case "memory_delete": {
-      const id = args?.id as number;
+      const id = args?.id;
+      if (id == null || typeof id !== "number")
+        throw new Error("memory_delete requires a numeric 'id'");
       const deleted = deleteFact(id);
       return {
         content: [
@@ -278,6 +288,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// --- Resources: auto-load top facts into context ---
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  resources: [
+    {
+      uri: "memory://context",
+      name: "Memory Context",
+      description:
+        "Top 30 most important memories ranked by access frequency, recency, and category. Read this at session start to have full context about the user.",
+      mimeType: "text/plain",
+    },
+  ],
+}));
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const { uri } = request.params;
+
+  if (uri === "memory://context" || uri.startsWith("memory://context?")) {
+    const facts = getTopFacts(30);
+    const total = countFacts();
+
+    if (facts.length === 0) {
+      return {
+        contents: [
+          {
+            uri,
+            mimeType: "text/plain",
+            text: "No memories stored yet.",
+          },
+        ],
+      };
+    }
+
+    // Group by category for readability
+    const grouped = new Map<string, typeof facts>();
+    for (const f of facts) {
+      const list = grouped.get(f.category) || [];
+      list.push(f);
+      grouped.set(f.category, list);
+    }
+
+    let text = `=== Memory Context (${facts.length}/${total} facts) ===\n`;
+    for (const [cat, items] of grouped) {
+      text += `\n[${cat}] (${items.length})\n`;
+      for (const f of items) {
+        const hits = f.accessCount > 0 ? ` [x${f.accessCount}]` : "";
+        text += `  - [${f.id}] ${f.fact}${hits}\n`;
+      }
+    }
+
+    return {
+      contents: [{ uri, mimeType: "text/plain", text }],
+    };
+  }
+
+  return {
+    contents: [
+      {
+        uri,
+        mimeType: "text/plain",
+        text: `Unknown resource: ${uri}. Available: memory://context`,
+      },
+    ],
+  };
+});
+
 // --- Start stdio server ---
 
 const transport = new StdioServerTransport();
@@ -285,6 +361,6 @@ await server.connect(transport);
 
 // --- Backfill embeddings for existing facts in background ---
 
-backfillEmbeddings().catch(() => {
-  // Silent fail — embeddings will be generated on next save
+backfillEmbeddings().catch((err) => {
+  console.error("Embedding backfill failed:", err?.message ?? err);
 });

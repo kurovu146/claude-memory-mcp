@@ -53,7 +53,7 @@ export async function saveFact(
 
   // Upsert: skip if exact same fact already exists
   const existing = db
-    .prepare(`SELECT id FROM memory_facts WHERE fact = ?`)
+    .prepare(`SELECT * FROM memory_facts WHERE fact = ?`)
     .get(fact) as any;
 
   if (existing) {
@@ -65,10 +65,10 @@ export async function saveFact(
       fact,
       category,
       source,
-      createdAt: now,
+      createdAt: existing.created_at,
       updatedAt: now,
-      lastAccessedAt: 0,
-      accessCount: 0,
+      lastAccessedAt: existing.last_accessed_at || 0,
+      accessCount: existing.access_count || 0,
     };
   }
 
@@ -90,50 +90,106 @@ export async function saveFact(
   };
 }
 
+/**
+ * Hybrid search: chạy FTS5 + semantic song song, merge bằng Reciprocal Rank Fusion.
+ * Fallback LIKE chỉ khi cả 2 đều trả về 0.
+ */
 export async function searchFacts(
-  keyword: string,
-  limit = 10
-): Promise<MemoryFact[]> {
-  // FTS5 BM25 ranking
-  const ftsRows = db
-    .prepare(
-      `SELECT m.*, bm25(memory_facts_fts) as rank
-     FROM memory_facts_fts fts
-     JOIN memory_facts m ON m.id = fts.rowid
-     WHERE memory_facts_fts MATCH ?
-     ORDER BY rank
-     LIMIT ?`
-    )
-    .all(keyword, limit) as any[];
-
-  if (ftsRows.length > 0) {
-    const facts = ftsRows.map(mapFact);
-    touchAccess(facts.map((f) => f.id));
-    return facts;
-  }
-
-  // LIKE fallback for partial matches
-  const likeRows = db
-    .prepare(
-      `SELECT * FROM memory_facts
-     WHERE fact LIKE ? OR category LIKE ?
-     ORDER BY updated_at DESC LIMIT ?`
-    )
-    .all(`%${keyword}%`, `%${keyword}%`, limit) as any[];
-
-  if (likeRows.length > 0) {
-    const facts = likeRows.map(mapFact);
-    touchAccess(facts.map((f) => f.id));
-    return facts;
-  }
-
-  // Semantic search fallback — vector similarity
-  return semanticSearch(keyword, limit);
-}
-
-export async function semanticSearch(
   query: string,
   limit = 10
+): Promise<MemoryFact[]> {
+  const candidatePool = limit * 3;
+
+  // Run FTS5 and semantic in parallel (skip access tracking — done after merge)
+  const [ftsResults, semResults] = await Promise.all([
+    ftsSearch(query, candidatePool),
+    semanticSearch(query, candidatePool, { trackAccess: false }),
+  ]);
+
+  // Both empty → LIKE fallback
+  if (ftsResults.length === 0 && semResults.length === 0) {
+    return likeFallback(query, limit);
+  }
+
+  // Merge with RRF
+  const merged = mergeWithRRF(ftsResults, semResults, limit);
+  touchAccess(merged.map((f) => f.id));
+  return merged;
+}
+
+/** FTS5 + BM25 keyword search */
+function ftsSearch(query: string, limit: number): MemoryFact[] {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT m.*
+       FROM memory_facts_fts fts
+       JOIN memory_facts m ON m.id = fts.rowid
+       WHERE memory_facts_fts MATCH ?
+       ORDER BY bm25(memory_facts_fts)
+       LIMIT ?`
+      )
+      .all(query, limit) as any[];
+    return rows.map(mapFact);
+  } catch {
+    // FTS5 MATCH can throw on invalid syntax — fall through
+    return [];
+  }
+}
+
+/** LIKE fallback for partial/substring matches */
+function likeFallback(query: string, limit: number): MemoryFact[] {
+  const escaped = query.replace(/%/g, "\\%").replace(/_/g, "\\_");
+  const rows = db
+    .prepare(
+      `SELECT * FROM memory_facts
+     WHERE fact LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\'
+     ORDER BY updated_at DESC LIMIT ?`
+    )
+    .all(`%${escaped}%`, `%${escaped}%`, limit) as any[];
+  const facts = rows.map(mapFact);
+  if (facts.length > 0) touchAccess(facts.map((f) => f.id));
+  return facts;
+}
+
+/**
+ * Reciprocal Rank Fusion — merge 2 ranked lists.
+ * score(d) = Σ 1/(k + rank_i) for each list where d appears.
+ * k=60 is standard. Documents in both lists get naturally boosted.
+ */
+function mergeWithRRF(
+  listA: MemoryFact[],
+  listB: MemoryFact[],
+  limit: number,
+  k = 60
+): MemoryFact[] {
+  const scores = new Map<number, { score: number; fact: MemoryFact }>();
+
+  for (let i = 0; i < listA.length; i++) {
+    const f = listA[i];
+    const entry = scores.get(f.id) || { score: 0, fact: f };
+    entry.score += 1 / (k + i + 1);
+    scores.set(f.id, entry);
+  }
+
+  for (let i = 0; i < listB.length; i++) {
+    const f = listB[i];
+    const entry = scores.get(f.id) || { score: 0, fact: f };
+    entry.score += 1 / (k + i + 1);
+    scores.set(f.id, entry);
+  }
+
+  return [...scores.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((e) => e.fact);
+}
+
+/** Semantic vector search — cosine similarity on embeddings */
+export async function semanticSearch(
+  query: string,
+  limit = 10,
+  { trackAccess = true }: { trackAccess?: boolean } = {}
 ): Promise<MemoryFact[]> {
   let queryEmbedding: Buffer;
   try {
@@ -142,30 +198,25 @@ export async function semanticSearch(
     return []; // Model not available — no semantic results
   }
 
-  // Load all facts that have embeddings
   const rows = db
     .prepare(`SELECT * FROM memory_facts WHERE embedding IS NOT NULL`)
     .all() as any[];
 
   if (rows.length === 0) return [];
 
-  // Compute cosine similarity and rank
-  const scored = rows
+  const results = rows
     .map((row) => ({
-      row,
+      fact: mapFact(row),
       score: cosineSimilarity(queryEmbedding, row.embedding as Buffer),
     }))
-    .filter((s) => s.score > 0.3) // threshold to avoid noise
+    .filter((s) => s.score > 0.3)
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .slice(0, limit)
+    .map((s) => s.fact);
 
-  if (scored.length > 0) {
-    const facts = scored.map((s) => mapFact(s.row));
-    touchAccess(facts.map((f) => f.id));
-    return facts;
-  }
-
-  return [];
+  if (trackAccess && results.length > 0)
+    touchAccess(results.map((f) => f.id));
+  return results;
 }
 
 export function listFacts(
@@ -237,6 +288,43 @@ export function countFacts(): number {
     .prepare(`SELECT COUNT(*) as cnt FROM memory_facts`)
     .get() as any;
   return row.cnt;
+}
+
+const CATEGORY_WEIGHT: Record<string, number> = {
+  preference: 3,
+  decision: 3,
+  workflow: 2,
+  technical: 2,
+  project: 1,
+  personal: 1,
+  general: 0,
+};
+
+/** Top N facts ranked by importance = access frequency + recency + category weight */
+export function getTopFacts(limit = 30): MemoryFact[] {
+  const rows = db
+    .prepare(`SELECT * FROM memory_facts ORDER BY updated_at DESC`)
+    .all() as any[];
+
+  if (rows.length === 0) return [];
+
+  const now = Date.now();
+  const DAY_MS = 86_400_000;
+
+  return rows
+    .map((row) => {
+      const fact = mapFact(row);
+      const daysSinceUpdate = (now - fact.updatedAt) / DAY_MS;
+      // Recency: 10 points for today, decays over 90 days
+      const recency = Math.max(0, 10 * (1 - daysSinceUpdate / 90));
+      const access = Math.min(fact.accessCount * 2, 20); // cap at 20
+      const catWeight = CATEGORY_WEIGHT[fact.category] ?? 0;
+      const score = access + recency + catWeight;
+      return { fact, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((s) => s.fact);
 }
 
 export async function backfillEmbeddings(): Promise<number> {
