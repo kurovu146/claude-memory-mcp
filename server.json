@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.kurovu146/memory-fts",
-  "description": "Long-term memory for Claude Code with SQLite FTS5 search and BM25 ranking",
+  "description": "Long-term memory for Claude Code with hybrid search (FTS5 + semantic) and auto context injection",
   "repository": {
     "url": "https://github.com/kurovu146/claude-memory-mcp",
     "source": "github"
   },
-  "version": "1.0.1",
+  "version": "2.0.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "claude-memory-fts",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "transport": {
         "type": "stdio"
       },
