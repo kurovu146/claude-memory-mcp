@@ -5,6 +5,80 @@
 // Install:
 //   npx claude-memory-fts
 //   claude mcp add memory -- npx claude-memory-fts
+//
+// CLI commands:
+//   npx claude-memory-fts --context       Output top 30 facts for hook injection
+//   npx claude-memory-fts --setup-hook    Auto-configure UserPromptSubmit hook
+
+import { getTopFacts, countFacts } from "./repository.js";
+import { homedir } from "os";
+import { join, dirname } from "path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+
+const args = process.argv.slice(2);
+
+if (args.includes("--context")) {
+  const facts = getTopFacts(30);
+  if (facts.length === 0) process.exit(0);
+
+  const grouped = new Map<string, typeof facts>();
+  for (const f of facts) {
+    const list = grouped.get(f.category) || [];
+    list.push(f);
+    grouped.set(f.category, list);
+  }
+  for (const [, items] of grouped) {
+    for (const f of items) {
+      const hits = f.accessCount > 0 ? ` [x${f.accessCount}]` : "";
+      console.log(`[${f.category}] ${f.fact}${hits}`);
+    }
+  }
+  process.exit(0);
+}
+
+if (args.includes("--setup-hook")) {
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  const scriptsDir = join(homedir(), ".claude", "scripts");
+
+  // 1. Create hook script
+  mkdirSync(scriptsDir, { recursive: true });
+  const scriptPath = join(scriptsDir, "memory-context.sh");
+  writeFileSync(
+    scriptPath,
+    `#!/bin/bash\nnpx claude-memory-fts --context 2>/dev/null\n`,
+    { mode: 0o755 }
+  );
+
+  // 2. Add hook to settings.json
+  let settings: any = {};
+  if (existsSync(settingsPath)) {
+    settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+  }
+
+  if (!settings.hooks) settings.hooks = {};
+  if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+
+  const hookCommand = `bash ${scriptPath}`;
+  const alreadyExists = settings.hooks.UserPromptSubmit.some((entry: any) =>
+    entry.hooks?.some((h: any) => h.command?.includes("memory-context"))
+  );
+
+  if (!alreadyExists) {
+    settings.hooks.UserPromptSubmit.push({
+      matcher: "",
+      hooks: [{ type: "command", command: hookCommand }],
+    });
+  }
+
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+
+  console.log("✅ Hook configured:");
+  console.log(`   Script: ${scriptPath}`);
+  console.log(`   Hook: UserPromptSubmit → memory-context.sh`);
+  console.log("\nTop 30 memories will be injected into every prompt.");
+  process.exit(0);
+}
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -20,8 +94,6 @@ import {
   listFacts,
   updateFact,
   deleteFact,
-  countFacts,
-  getTopFacts,
   backfillEmbeddings,
 } from "./repository.js";
 
