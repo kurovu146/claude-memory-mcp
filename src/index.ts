@@ -95,6 +95,8 @@ import {
   updateFact,
   deleteFact,
   backfillEmbeddings,
+  backfillRelations,
+  getRelatedFacts,
 } from "./repository.js";
 
 const server = new Server(
@@ -236,15 +238,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!fact || typeof fact !== "string")
         throw new Error("memory_save requires a non-empty 'fact' string");
       const category = (args?.category as string) || "general";
-      const saved = await saveFact(fact, category, "claude-code");
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `✅ Saved [${saved.id}] [${category}]: "${fact}"`,
-          },
-        ],
-      };
+      const { fact: saved, relatedLinks } = await saveFact(fact, category, "claude-code");
+      let text = `✅ Saved [${saved.id}] [${category}]: "${fact}"`;
+      if (relatedLinks.length > 0) {
+        const links = relatedLinks.map(r => `#${r.id} ${r.fact.slice(0, 60)} (${r.similarity.toFixed(2)})`).join(", ");
+        text += `\n🔗 Related: ${links}`;
+      }
+      return { content: [{ type: "text" as const, text }] };
     }
 
     case "memory_search": {
@@ -269,7 +269,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         .map((f) => {
           const date = new Date(f.updatedAt).toLocaleDateString("en-US");
           const hits = f.accessCount > 0 ? ` [x${f.accessCount}]` : "";
-          return `[${f.id}] [${f.category}] ${f.fact} (${date}${hits})`;
+          let line = `[${f.id}] [${f.category}] ${f.fact} (${date}${hits})`;
+          const related = getRelatedFacts(f.id);
+          if (related.length > 0) {
+            const relStr = related.slice(0, 3).map(r => `#${r.id} ${r.fact.slice(0, 50)} (${r.similarity.toFixed(2)})`).join(", ");
+            line += `\n  🔗 Related: ${relStr}`;
+          }
+          return line;
         })
         .join("\n");
 
@@ -433,6 +439,8 @@ await server.connect(transport);
 
 // --- Backfill embeddings for existing facts in background ---
 
-backfillEmbeddings().catch((err) => {
-  console.error("Embedding backfill failed:", err?.message ?? err);
-});
+backfillEmbeddings()
+  .then(() => backfillRelations())
+  .catch((err) => {
+    console.error("Backfill failed:", err?.message ?? err);
+  });

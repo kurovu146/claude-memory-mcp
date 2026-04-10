@@ -14,6 +14,11 @@ export interface MemoryFact {
   accessCount: number;
 }
 
+export interface SaveResult {
+  fact: MemoryFact;
+  relatedLinks: Array<{ id: number; fact: string; similarity: number }>;
+}
+
 function mapFact(r: any): MemoryFact {
   return {
     id: r.id,
@@ -40,7 +45,7 @@ export async function saveFact(
   fact: string,
   category = "general",
   source = ""
-): Promise<MemoryFact> {
+): Promise<SaveResult> {
   const now = Date.now();
 
   // Generate embedding
@@ -60,7 +65,7 @@ export async function saveFact(
     db.prepare(
       `UPDATE memory_facts SET category = ?, source = ?, updated_at = ?, embedding = ? WHERE id = ?`
     ).run(category, source, now, embedding, existing.id);
-    return {
+    const saved: MemoryFact = {
       id: existing.id,
       fact,
       category,
@@ -70,6 +75,13 @@ export async function saveFact(
       lastAccessedAt: existing.last_accessed_at || 0,
       accessCount: existing.access_count || 0,
     };
+
+    // Auto-link related facts
+    let relatedLinks: Array<{ id: number; fact: string; similarity: number }> = [];
+    if (embedding) {
+      relatedLinks = await autoLinkFact(saved.id, embedding);
+    }
+    return { fact: saved, relatedLinks };
   }
 
   const result = db
@@ -78,7 +90,7 @@ export async function saveFact(
      VALUES (?, ?, ?, ?, ?, ?)`
     )
     .run(fact, category, source, now, now, embedding);
-  return {
+  const saved: MemoryFact = {
     id: Number(result.lastInsertRowid),
     fact,
     category,
@@ -88,6 +100,67 @@ export async function saveFact(
     lastAccessedAt: 0,
     accessCount: 0,
   };
+
+  // Auto-link related facts
+  let relatedLinks: Array<{ id: number; fact: string; similarity: number }> = [];
+  if (embedding) {
+    relatedLinks = await autoLinkFact(saved.id, embedding);
+  }
+  return { fact: saved, relatedLinks };
+}
+
+/** Link two facts by similarity. Enforces fact_id_1 < fact_id_2. */
+function linkFacts(idA: number, idB: number, similarity: number): void {
+  const [lo, hi] = idA < idB ? [idA, idB] : [idB, idA];
+  db.prepare(
+    `INSERT OR REPLACE INTO fact_relations (fact_id_1, fact_id_2, similarity) VALUES (?, ?, ?)`
+  ).run(lo, hi, similarity);
+}
+
+/** Delete all relations for a fact (used before recomputing). */
+function deleteFactRelations(factId: number): void {
+  db.prepare(
+    `DELETE FROM fact_relations WHERE fact_id_1 = ? OR fact_id_2 = ?`
+  ).run(factId, factId);
+}
+
+/** Get related facts for a given fact ID. */
+export function getRelatedFacts(factId: number): Array<{ id: number; fact: string; category: string; similarity: number }> {
+  const rows = db.prepare(
+    `SELECT mf.id, mf.fact, mf.category, fr.similarity
+     FROM fact_relations fr
+     JOIN memory_facts mf ON mf.id = CASE
+       WHEN fr.fact_id_1 = ? THEN fr.fact_id_2
+       ELSE fr.fact_id_1
+     END
+     WHERE fr.fact_id_1 = ? OR fr.fact_id_2 = ?
+     ORDER BY fr.similarity DESC`
+  ).all(factId, factId, factId) as any[];
+  return rows.map(r => ({ id: r.id, fact: r.fact, category: r.category, similarity: r.similarity }));
+}
+
+/** Auto-link a fact to its top 3 most similar existing facts (cosine > 0.75). */
+async function autoLinkFact(factId: number, factEmbedding: Buffer): Promise<Array<{ id: number; fact: string; similarity: number }>> {
+  const rows = db.prepare(
+    `SELECT id, fact, embedding FROM memory_facts WHERE id != ? AND embedding IS NOT NULL`
+  ).all(factId) as any[];
+
+  const similarities: Array<{ id: number; fact: string; sim: number }> = [];
+  for (const row of rows) {
+    const sim = cosineSimilarity(factEmbedding, row.embedding as Buffer);
+    if (sim > 0.75) {
+      similarities.push({ id: row.id, fact: row.fact, sim });
+    }
+  }
+
+  similarities.sort((a, b) => b.sim - a.sim);
+  const top = similarities.slice(0, 3);
+
+  for (const { id, sim } of top) {
+    linkFacts(factId, id, sim);
+  }
+
+  return top.map(t => ({ id: t.id, fact: t.fact, similarity: t.sim }));
 }
 
 /**
@@ -268,6 +341,12 @@ export async function updateFact(
     `UPDATE memory_facts SET fact = ?, category = ?, updated_at = ?, embedding = ? WHERE id = ?`
   ).run(newFact, newCategory, now, embedding, id);
 
+  // Recompute relations if embedding changed
+  if (updates.fact && updates.fact !== existing.fact && embedding) {
+    deleteFactRelations(id);
+    await autoLinkFact(id, embedding);
+  }
+
   return mapFact({
     ...existing,
     fact: newFact,
@@ -346,4 +425,36 @@ export async function backfillEmbeddings(): Promise<number> {
     }
   }
   return count;
+}
+
+export async function backfillRelations(): Promise<number> {
+  const rows = db.prepare(
+    `SELECT id, embedding FROM memory_facts WHERE embedding IS NOT NULL`
+  ).all() as any[];
+
+  if (rows.length < 2) return 0;
+
+  // Compute all pairwise similarities and batch-insert above threshold
+  const links: Array<[number, number, number]> = [];
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      const sim = cosineSimilarity(rows[i].embedding as Buffer, rows[j].embedding as Buffer);
+      if (sim > 0.75) {
+        links.push([rows[i].id, rows[j].id, sim]);
+      }
+    }
+  }
+
+  if (links.length === 0) return 0;
+
+  const insert = db.prepare(
+    `INSERT OR REPLACE INTO fact_relations (fact_id_1, fact_id_2, similarity) VALUES (?, ?, ?)`
+  );
+  const batchInsert = db.transaction((items: Array<[number, number, number]>) => {
+    for (const [a, b, sim] of items) {
+      insert.run(a, b, sim);
+    }
+  });
+  batchInsert(links);
+  return links.length;
 }

@@ -17,6 +17,7 @@ export const db: DatabaseType = new Database(DB_PATH);
 
 // WAL mode — faster writes
 db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
 // --- Schema ---
 
@@ -81,3 +82,20 @@ const columns = db.pragma("table_info(memory_facts)") as any[];
 if (!columns.some((c: any) => c.name === "embedding")) {
   db.exec(`ALTER TABLE memory_facts ADD COLUMN embedding BLOB`);
 }
+
+// --- Migration: add fact_relations table for semantic linking ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS fact_relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id_1 INTEGER NOT NULL REFERENCES memory_facts(id) ON DELETE CASCADE,
+    fact_id_2 INTEGER NOT NULL REFERENCES memory_facts(id) ON DELETE CASCADE,
+    similarity REAL NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+    UNIQUE(fact_id_1, fact_id_2),
+    CHECK(fact_id_1 < fact_id_2)
+  )
+`);
+
+db.exec(`CREATE INDEX IF NOT EXISTS idx_fact_relations_1 ON fact_relations(fact_id_1)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_fact_relations_2 ON fact_relations(fact_id_2)`);
