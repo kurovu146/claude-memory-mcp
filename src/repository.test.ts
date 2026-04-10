@@ -58,6 +58,7 @@ import {
 import { db } from "./db.js";
 
 beforeEach(() => {
+  db.exec(`DELETE FROM fact_relations`);
   db.exec(`DELETE FROM memory_facts`);
   db.exec(
     `INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')`
@@ -66,32 +67,32 @@ beforeEach(() => {
 
 describe("saveFact", () => {
   it("saves a new fact and returns it", async () => {
-    const fact = await saveFact("User prefers TypeScript", "preference");
+    const { fact } = await saveFact("User prefers TypeScript", "preference");
     expect(fact.id).toBeGreaterThan(0);
     expect(fact.fact).toBe("User prefers TypeScript");
     expect(fact.category).toBe("preference");
   });
 
   it("upserts when same fact text exists", async () => {
-    const first = await saveFact("User likes React", "preference");
-    const second = await saveFact("User likes React", "technical");
+    const { fact: first } = await saveFact("User likes React", "preference");
+    const { fact: second } = await saveFact("User likes React", "technical");
     expect(second.id).toBe(first.id);
     expect(second.category).toBe("technical");
   });
 
   it("uses 'general' as default category", async () => {
-    const fact = await saveFact("some info");
+    const { fact } = await saveFact("some info");
     expect(fact.category).toBe("general");
   });
 
   it("preserves accessCount and lastAccessedAt on upsert", async () => {
-    const first = await saveFact("Track me", "general");
+    const { fact: first } = await saveFact("Track me", "general");
     // Simulate access
     db.prepare(
       `UPDATE memory_facts SET access_count = 5, last_accessed_at = 12345 WHERE id = ?`
     ).run(first.id);
 
-    const second = await saveFact("Track me", "technical");
+    const { fact: second } = await saveFact("Track me", "technical");
     expect(second.id).toBe(first.id);
     expect(second.accessCount).toBe(5);
     expect(second.lastAccessedAt).toBe(12345);
@@ -159,7 +160,7 @@ describe("searchFacts (hybrid)", () => {
   });
 
   it("increments access_count on search", async () => {
-    const saved = await saveFact("Track access count", "technical");
+    const { fact: saved } = await saveFact("Track access count", "technical");
     await searchFacts("access");
     await searchFacts("access");
 
@@ -205,7 +206,7 @@ describe("listFacts", () => {
 
 describe("updateFact", () => {
   it("updates fact content", async () => {
-    const saved = await saveFact("Old content", "general");
+    const { fact: saved } = await saveFact("Old content", "general");
     const updated = await updateFact(saved.id, { fact: "New content" });
     expect(updated).not.toBeNull();
     expect(updated!.fact).toBe("New content");
@@ -213,14 +214,14 @@ describe("updateFact", () => {
   });
 
   it("updates category only", async () => {
-    const saved = await saveFact("Keep this text", "general");
+    const { fact: saved } = await saveFact("Keep this text", "general");
     const updated = await updateFact(saved.id, { category: "technical" });
     expect(updated!.fact).toBe("Keep this text");
     expect(updated!.category).toBe("technical");
   });
 
   it("updates both fact and category", async () => {
-    const saved = await saveFact("Old", "general");
+    const { fact: saved } = await saveFact("Old", "general");
     const updated = await updateFact(saved.id, {
       fact: "New",
       category: "decision",
@@ -235,7 +236,7 @@ describe("updateFact", () => {
   });
 
   it("updates FTS5 index after update", async () => {
-    const saved = await saveFact("Original searchable text", "general");
+    const { fact: saved } = await saveFact("Original searchable text", "general");
     await updateFact(saved.id, { fact: "Completely different content" });
 
     const oldResults = await searchFacts("Original");
@@ -249,7 +250,7 @@ describe("updateFact", () => {
 
 describe("deleteFact", () => {
   it("deletes an existing fact", async () => {
-    const saved = await saveFact("To be deleted", "general");
+    const { fact: saved } = await saveFact("To be deleted", "general");
     expect(deleteFact(saved.id)).toBe(true);
     expect(countFacts()).toBe(0);
   });
@@ -259,7 +260,7 @@ describe("deleteFact", () => {
   });
 
   it("removes from FTS5 index", async () => {
-    const saved = await saveFact("Searchable content", "general");
+    const { fact: saved } = await saveFact("Searchable content", "general");
     deleteFact(saved.id);
     const results = await searchFacts("Searchable");
     expect(results).toHaveLength(0);
@@ -357,8 +358,8 @@ describe("getTopFacts", () => {
   });
 
   it("boosts frequently accessed facts", async () => {
-    const rare = await saveFact("Rarely accessed", "general");
-    const popular = await saveFact("Often accessed", "general");
+    await saveFact("Rarely accessed", "general");
+    const { fact: popular } = await saveFact("Often accessed", "general");
 
     // Simulate access
     db.prepare(
