@@ -1,7 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { join } from "path";
-import { tmpdir } from "os";
-import { randomUUID } from "crypto";
 
 // Mock embeddings to avoid model download in tests
 vi.mock("./embeddings.js", () => {
@@ -41,9 +38,10 @@ vi.mock("./embeddings.js", () => {
   };
 });
 
-// Use a fresh temp DB for each test file
-process.env.MEMORY_DB_PATH = join(tmpdir(), `memory-test-${randomUUID()}.db`);
-
+// NOTE: MEMORY_DB_PATH is set by src/test-setup.ts (wired via vitest.config.ts
+// setupFiles). Do NOT set it here — ES module import hoisting would evaluate
+// db.js before any top-level assignment, pointing the singleton at the
+// production DB and causing beforeEach DELETE hooks to wipe real memories.
 import {
   saveFact,
   searchFacts,

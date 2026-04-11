@@ -7,6 +7,19 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { mkdirSync } from "fs";
 
+// Safety guard: refuse to open the production DB from a Vitest run.
+// vitest auto-sets VITEST=true in every worker. If a test forgets to override
+// MEMORY_DB_PATH (e.g. via src/test-setup.ts), the `beforeEach` DELETE hooks
+// in repository.test.ts would wipe ~/.claude/memory.db. Throw instead so the
+// failure is loud and user memories stay safe.
+if (process.env.VITEST === "true" && !process.env.MEMORY_DB_PATH) {
+  throw new Error(
+    "[claude-memory-fts] Refusing to open production DB inside Vitest. " +
+      "Set MEMORY_DB_PATH to an isolated path before db.js is imported " +
+      "(see src/test-setup.ts).",
+  );
+}
+
 const DB_PATH =
   process.env.MEMORY_DB_PATH || join(homedir(), ".claude", "memory.db");
 
