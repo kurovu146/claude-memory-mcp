@@ -1,6 +1,6 @@
 {
   "name": "claude-memory-fts",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "mcpName": "io.github.kurovu146/memory-fts",
   "description": "Long-term memory MCP server for Claude Code with hybrid search (FTS5 + semantic), RRF ranking, and auto context injection",
   "type": "module",
